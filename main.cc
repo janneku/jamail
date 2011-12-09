@@ -36,11 +36,25 @@ GtkWidget *messages_view;
 /* columns of the message list */
 enum {
 	COL_ID,
-	COL_TITLE,
+	COL_SUBJECT,
 	MAX_COL
 };
 
 }
+
+struct HeaderAddress {
+	std::string name;
+	std::string email;
+};
+
+struct Headers {
+	std::string subject;
+	size_t size;
+	HeaderAddress sender;
+	std::list<HeaderAddress> from;
+	std::list<HeaderAddress> to;
+	std::list<HeaderAddress> cc;
+};
 
 class Account {
 public:
@@ -132,6 +146,66 @@ int set_nonblock(int fd, bool enabled)
 	return fcntl(fd, F_SETFL, flags);
 }
 
+bool check(std::istream &is, char token)
+{
+	char c = is.peek();
+	while (is && isspace(c)) {
+		is.get();
+		c = is.peek();
+	}
+	if (is && c == token) {
+		is.get();
+		return true;
+	}
+	return false;
+}
+
+void expect(std::istream &is, char token)
+{
+	char c;
+	is >> c;
+	if (!is || c != token) {
+		throw std::runtime_error(strf("Expect failed for %c", token));
+	}
+}
+
+bool is_atom(int c)
+{
+	return !isspace(c) && c != '(' && c != ')' && c != '{';
+}
+
+/* read a string from the stream (consisting of atom characters) */
+std::string parse_astring(std::istream &is)
+{
+	char c;
+	is >> c;
+	if (!is || !is_atom(c)) {
+		throw std::runtime_error("Expected an atom string");
+	}
+	std::string out;
+	out += c;
+	c = is.peek();
+	while (is && is_atom(c)) {
+		out += c;
+		is.get();
+		c = is.peek();
+	}
+	return out;
+}
+
+/* read a quoted or a literal string from the stream */
+std::string parse_string(std::istream &is)
+{
+	expect(is, '"');
+	std::string out;
+	char c = is.get();
+	while (is && c != '"') {
+		out += c;
+		c = is.get();
+	}
+	return out;
+}
+
 void load_config(const char *fname)
 {
 	std::ifstream f(fname);
@@ -141,12 +215,15 @@ void load_config(const char *fname)
 
 	std::string line;
 	while (getline(f, line)) {
-		if (line.empty() || line[0] == '#')
+		if (line[0] == '#')
 			continue;
 		std::istringstream parser(line);
 
 		std::string type;
 		parser >> type;
+		if (!parser)
+			continue;
+
 		if (type == "account") {
 			std::string server, user, pw;
 			parser >> server >> user >> pw;
@@ -233,6 +310,53 @@ void Account::connect()
 	}
 }
 
+void parse_fetch_headers(Headers *headers, std::istringstream &parser)
+{
+	expect(parser, '(');
+	while (!check(parser, ')')) {
+		std::string type = parse_astring(parser);
+		if (!parser) {
+			throw std::runtime_error("Invalid field type");
+		}
+
+		if (type == "INTERNALDATE") {
+			std::string date = parse_string(parser);
+			if (!parser) {
+				throw std::runtime_error("Invalid date");
+			}
+
+		} else if (type == "RFC822.SIZE") {
+			parser >> headers->size;
+
+		} else if (type == "FLAGS") {
+			expect(parser, '(');
+			while (!check(parser, ')')) {
+				std::string flag = parse_astring(parser);
+				if (!parser) {
+					throw std::runtime_error("Invalid flag");
+				}
+			}
+
+		} else if (type == "ENVELOPE") {
+			expect(parser, '(');
+			std::string date = parse_string(parser);
+			if (!parser) {
+				throw std::runtime_error("Invalid date");
+			}
+			headers->subject = parse_string(parser);
+			if (!parser) {
+				throw std::runtime_error("Invalid subject");
+			}
+
+			/* TODO: parse the rest of the fields */
+			return;
+
+		} else {
+			debug("unknown fetch field: %s\n", type.c_str());
+		}
+	}
+}
+
 size_t Account::process_recv(const std::string &buf)
 {
 	size_t i = 0;
@@ -297,9 +421,16 @@ size_t Account::process_recv(const std::string &buf)
 				m_state = S_IDLE;
 
 			} else if (id == "*") {
-				std::string id, status, title;
+				std::string id, status;
 				parser >> id >> status;
-				title = line.substr(parser.tellg());
+
+				Headers headers;
+				/* TODO: write a proper parser */
+				try {
+					parse_fetch_headers(&headers, parser);
+				} catch (const std::runtime_error &e) {
+					/* ignore */
+				}
 
 				GtkListStore *store =
 					GTK_LIST_STORE(gtk_tree_view_get_model(
@@ -307,8 +438,10 @@ size_t Account::process_recv(const std::string &buf)
 
 				GtkTreeIter iter;
 				gtk_list_store_append(store, &iter);
-				gtk_list_store_set(store, &iter, COL_ID, id.c_str(),
-						   COL_TITLE, title.c_str(), -1);
+				gtk_list_store_set(store, &iter,
+					COL_ID, id.c_str(),
+					COL_SUBJECT, headers.subject.c_str(),
+					-1);
 			}
 			break;
 
@@ -438,7 +571,7 @@ MainWindow::MainWindow()
 	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
 		-1, "ID", renderer1, "text", COL_ID, NULL);
 	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
-		-1, "Title", renderer2, "text", COL_TITLE, NULL);
+		-1, "Subject", renderer2, "text", COL_SUBJECT, NULL);
 
 	GtkWidget *scrollwin = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollwin),
