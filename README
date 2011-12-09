@@ -1,0 +1,13 @@
+jamail - Just another mail client
+
+Copyright 2011 Janne Kulmala <janne.t.kulmala@iki.fi>
+
+Program code is licensed with GNU LGPL 2.1. See COPYING.LGPL file.
+
+A simple IMAP client that tries to do everyting right (TM).
+
+Sample config file (stored in ~/.jamail):
+    --- BEGIN ---
+    account mail.example.org username password
+    ---- END ----
+
