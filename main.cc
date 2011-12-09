@@ -73,6 +73,8 @@ private:
 
 	size_t process_recv(const std::string &buf);
 	void ssl_handle_error(int ret);
+	void install_write_watch();
+	void remove_write_watch();
 	void try_read();
 	void try_write();
 
@@ -176,9 +178,7 @@ Account::~Account()
 	if (m_watch != INVALID_GTK_WATCH) {
 		g_source_remove(m_watch);
 	}
-	if (m_write_watch != INVALID_GTK_WATCH) {
-		g_source_remove(m_write_watch);
-	}
+	remove_write_watch();
 	if (m_conn != NULL) {
 		SSL_free(m_conn);
 	}
@@ -217,6 +217,8 @@ void Account::connect()
 
 	SSL_CTX *ctx = SSL_CTX_new(SSLv23_client_method());
 	SSL_CTX_set_options(ctx, SSL_OP_ALL);
+	SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE|
+			 SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
 	m_conn = SSL_new(ctx);
 	if (m_conn == NULL) {
@@ -324,16 +326,39 @@ void Account::ssl_handle_error(int ret)
 	int error = SSL_get_error(m_conn, ret);
 	switch (error) {
 	case SSL_ERROR_WANT_READ:
-		break;
-	case SSL_ERROR_WANT_WRITE:
-		if (m_write_watch == INVALID_GTK_WATCH) {
-			debug("installing write watch\n");
-			m_write_watch = g_io_add_watch(m_iochannel, G_IO_OUT,
-						       write_ready, this);
+		/*
+		 * We don't care if SSL wants to read, because we always do.
+		 * SSL also uses this to signal that it no longer needs to send.
+		 */
+		if (m_send_buf.empty()) {
+			remove_write_watch();
 		}
 		break;
+	case SSL_ERROR_WANT_WRITE:
+		/* SSL wants to send something */
+		install_write_watch();
+		break;
+	case SSL_ERROR_SYSCALL:
+		throw std::runtime_error(strf("SSL: syscall error (%s)",
+					 strerror(errno)));
 	default:
-		throw std::runtime_error("SSL error occured");
+		throw std::runtime_error("SSL: an error occured");
+	}
+}
+
+void Account::install_write_watch()
+{
+	if (m_write_watch == INVALID_GTK_WATCH) {
+		m_write_watch = g_io_add_watch(m_iochannel, G_IO_OUT,
+					       write_ready, this);
+	}
+}
+
+void Account::remove_write_watch()
+{
+	if (m_write_watch != INVALID_GTK_WATCH) {
+		g_source_remove(m_write_watch);
+		m_write_watch = INVALID_GTK_WATCH;
 	}
 }
 
@@ -361,10 +386,14 @@ void Account::try_write()
 	}
 	m_send_buf.erase(m_send_buf.begin(), m_send_buf.begin() + written);
 
-	if (m_send_buf.empty() && m_write_watch != INVALID_GTK_WATCH) {
-		debug("removing write watch\n");
-		g_source_remove(m_write_watch);
-		m_write_watch = INVALID_GTK_WATCH;
+	/*
+	 * Install a write watch if there is more data to send, as SSL might
+	 * able to send more data when the socket becomes writable.
+	  */
+	if (!m_send_buf.empty()) {
+		install_write_watch();
+	} else {
+		remove_write_watch();
 	}
 }
 
