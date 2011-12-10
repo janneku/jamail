@@ -36,11 +36,24 @@ GtkWidget *messages_view;
 /* columns of the message list */
 enum {
 	COL_ID,
+	COL_FROM,
 	COL_SUBJECT,
 	MAX_COL
 };
 
 }
+
+class imap_parse_error: public std::runtime_error {
+public:
+	imap_parse_error(const std::string &what) :
+		std::runtime_error(what)
+	{}
+};
+
+class imap_need_more: std::exception {
+public:
+	imap_need_more() {}
+};
 
 struct HeaderAddress {
 	std::string name;
@@ -48,12 +61,17 @@ struct HeaderAddress {
 };
 
 struct Headers {
-	std::string subject;
 	size_t size;
-	HeaderAddress sender;
+	std::string date;
+	std::string subject;
 	std::list<HeaderAddress> from;
+	std::list<HeaderAddress> sender;
+	std::list<HeaderAddress> reply_to;
 	std::list<HeaderAddress> to;
 	std::list<HeaderAddress> cc;
+	std::list<HeaderAddress> bcc;
+	std::string parent_id;
+	std::string message_id;
 };
 
 class Account {
@@ -96,6 +114,8 @@ private:
 	static int data_available(GIOChannel *io, GIOCondition cond,
 				  gpointer ptr);
 	static int write_ready(GIOChannel *io, GIOCondition cond, gpointer ptr);
+
+	DISABLE_COPY_AND_ASSIGN(Account);
 };
 
 class MainWindow {
@@ -146,8 +166,10 @@ int set_nonblock(int fd, bool enabled)
 	return fcntl(fd, F_SETFL, flags);
 }
 
+/* if the next token is the given one, skip it */
 bool check(std::istream &is, char token)
 {
+	/* skip leading space */
 	char c = is.peek();
 	while (is && isspace(c)) {
 		is.get();
@@ -162,10 +184,11 @@ bool check(std::istream &is, char token)
 
 void expect(std::istream &is, char token)
 {
+	/* skips leading space */
 	char c;
 	is >> c;
 	if (!is || c != token) {
-		throw std::runtime_error(strf("Expect failed for %c", token));
+		throw imap_parse_error(strf("Expected token %c", token));
 	}
 }
 
@@ -174,13 +197,14 @@ bool is_atom(int c)
 	return !isspace(c) && c != '(' && c != ')' && c != '{';
 }
 
-/* read a string from the stream (consisting of atom characters) */
+/* read an IMAP string (consisting of atom characters) */
 std::string parse_astring(std::istream &is)
 {
+	/* skips leading space */
 	char c;
 	is >> c;
 	if (!is || !is_atom(c)) {
-		throw std::runtime_error("Expected an atom string");
+		throw imap_parse_error("Expected an atom string");
 	}
 	std::string out;
 	out += c;
@@ -193,17 +217,68 @@ std::string parse_astring(std::istream &is)
 	return out;
 }
 
-/* read a quoted or a literal string from the stream */
+/* read a quoted or a literal IMAP string */
 std::string parse_string(std::istream &is)
 {
-	expect(is, '"');
-	std::string out;
-	char c = is.get();
-	while (is && c != '"') {
-		out += c;
+	if (check(is, '{')) {
+		/* a literal string, with length of the string as a prefix */
+		size_t length;
+		is >> length;
+		if (!is) {
+			throw imap_parse_error("Invalid literal length");
+		}
+		expect(is, '}');
+
+		/* skip leading space (and the CRLF) */
+		char c = is.get();
+		while (is && c != '\r') {
+			if (!isspace(c)) {
+				throw imap_parse_error("Junk before CRLF");
+			}
+			c = is.get();
+		}
+		/*
+		 * One CRLF-terminated line is read at a time from the server.
+		 * The content of the string is after a CRLF, and we need to
+		 * signal that the caller needs to give us another line.
+		 */
+		if (!is) {
+			throw imap_need_more();
+		}
+
+		/* skip the LF */
 		c = is.get();
+		if (!is || c != '\n') {
+			throw imap_parse_error("Expected an LF");
+		}
+
+		std::string out(length, 0);
+		if (!is.read(&out[0], length)) {
+			throw imap_need_more();
+		}
+		return out;
 	}
-	return out;
+
+	if (check(is, '"')) {
+		/* a quoted string */
+		std::string out;
+		char c = is.get();
+		while (is && c != '"') {
+			out += c;
+			c = is.get();
+		}
+		if (!is) {
+			throw imap_parse_error("Unterminated string");
+		}
+		return out;
+	}
+
+	/* handle NIL */
+	std::string nil = parse_astring(is);
+	if (nil != "NIL") {
+		throw imap_parse_error("Not an address list or a NIL");
+	}
+	return "";
 }
 
 void load_config(const char *fname)
@@ -310,20 +385,40 @@ void Account::connect()
 	}
 }
 
-void parse_fetch_headers(Headers *headers, std::istringstream &parser)
+std::list<HeaderAddress> parse_address_list(std::istream &parser)
+{
+	if (check(parser, '(')) {
+		std::list<HeaderAddress> addresses;
+		while (!check(parser, ')')) {
+			expect(parser, '(');
+			HeaderAddress addr;
+			addr.name = parse_string(parser);
+			parse_string(parser); /* ignored */
+			std::string mailbox = parse_string(parser);
+			std::string host = parse_string(parser);
+			addr.email = mailbox + "@" + host;
+			addresses.push_back(addr);
+			expect(parser, ')');
+		}
+		return addresses;
+	}
+
+	/* handle NIL */
+	std::string nil = parse_astring(parser);
+	if (nil != "NIL") {
+		throw imap_parse_error("Not a string or a NIL");
+	}
+	return std::list<HeaderAddress>();
+}
+
+void parse_fetch_headers(Headers *headers, std::istream &parser)
 {
 	expect(parser, '(');
 	while (!check(parser, ')')) {
 		std::string type = parse_astring(parser);
-		if (!parser) {
-			throw std::runtime_error("Invalid field type");
-		}
 
 		if (type == "INTERNALDATE") {
 			std::string date = parse_string(parser);
-			if (!parser) {
-				throw std::runtime_error("Invalid date");
-			}
 
 		} else if (type == "RFC822.SIZE") {
 			parser >> headers->size;
@@ -332,23 +427,24 @@ void parse_fetch_headers(Headers *headers, std::istringstream &parser)
 			expect(parser, '(');
 			while (!check(parser, ')')) {
 				std::string flag = parse_astring(parser);
-				if (!parser) {
-					throw std::runtime_error("Invalid flag");
-				}
 			}
 
 		} else if (type == "ENVELOPE") {
 			expect(parser, '(');
-			std::string date = parse_string(parser);
-			if (!parser) {
-				throw std::runtime_error("Invalid date");
-			}
+			headers->date = parse_string(parser);
 			headers->subject = parse_string(parser);
-			if (!parser) {
-				throw std::runtime_error("Invalid subject");
-			}
+			headers->from = parse_address_list(parser);
+			headers->sender = parse_address_list(parser);
+			headers->reply_to = parse_address_list(parser);
+			headers->to = parse_address_list(parser);
+			headers->cc = parse_address_list(parser);
+			headers->bcc = parse_address_list(parser);
+			headers->parent_id = parse_string(parser);
+			headers->message_id = parse_string(parser);
+			expect(parser, ')');
 
-			/* TODO: parse the rest of the fields */
+		} else if (type == "BODY") {
+			/* TODO: just ignore the rest.. */
 			return;
 
 		} else {
@@ -359,13 +455,16 @@ void parse_fetch_headers(Headers *headers, std::istringstream &parser)
 
 size_t Account::process_recv(const std::string &buf)
 {
-	size_t i = 0;
-	while (1) {
-		size_t j = buf.find("\r\n", i);
+	size_t begin = 0;
+	size_t i = 0, j;
+	/* TODO: fix the indentation */
+	while (1)
+	try {
+		j = buf.find("\r\n", i);
 		if (j == std::string::npos)
 			break;
 
-		std::string line = buf.substr(i, j - i);
+		std::string line = buf.substr(begin, j - begin);
 		/* debug("RECV: %s\n", line.c_str()); */
 
 		std::istringstream parser(line);
@@ -428,8 +527,10 @@ size_t Account::process_recv(const std::string &buf)
 				/* TODO: write a proper parser */
 				try {
 					parse_fetch_headers(&headers, parser);
-				} catch (const std::runtime_error &e) {
-					/* ignore */
+				} catch (const imap_parse_error &e) {
+					printf("IMAP parse error: %s\n",
+						e.what());
+					printf("\"%s\"\n", line.c_str());
 				}
 
 				GtkListStore *store =
@@ -440,6 +541,7 @@ size_t Account::process_recv(const std::string &buf)
 				gtk_list_store_append(store, &iter);
 				gtk_list_store_set(store, &iter,
 					COL_ID, id.c_str(),
+					COL_FROM, headers.from.front().email.c_str(),
 					COL_SUBJECT, headers.subject.c_str(),
 					-1);
 			}
@@ -450,8 +552,11 @@ size_t Account::process_recv(const std::string &buf)
 		}
 
 		i = j + 2;
+		begin = i;
+	} catch (const imap_need_more &) {
+		i = j + 2;
 	}
-	return i;
+	return begin;
 }
 
 void Account::ssl_handle_error(int ret)
@@ -563,15 +668,19 @@ MainWindow::MainWindow()
 			 G_CALLBACK(gtk_main_quit), NULL);
 
 	GtkListStore *store =
-		gtk_list_store_new(MAX_COL, G_TYPE_STRING, G_TYPE_STRING);
+		gtk_list_store_new(MAX_COL, G_TYPE_STRING, G_TYPE_STRING,
+				   G_TYPE_STRING);
 	messages_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
 
-	GtkCellRenderer *renderer1 = gtk_cell_renderer_text_new();
-	GtkCellRenderer *renderer2 = gtk_cell_renderer_text_new();
+	GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
 	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
-		-1, "ID", renderer1, "text", COL_ID, NULL);
+		-1, "ID", renderer, "text", COL_ID, NULL);
+	renderer = gtk_cell_renderer_text_new();
 	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
-		-1, "Subject", renderer2, "text", COL_SUBJECT, NULL);
+		-1, "From", renderer, "text", COL_FROM, NULL);
+	renderer = gtk_cell_renderer_text_new();
+	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
+		-1, "Subject", renderer, "text", COL_SUBJECT, NULL);
 
 	GtkWidget *scrollwin = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollwin),
