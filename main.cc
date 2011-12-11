@@ -121,6 +121,7 @@ private:
 class MainWindow {
 public:
 	MainWindow();
+	~MainWindow();
 
 private:
 	GtkWidget *m_window;
@@ -663,6 +664,7 @@ MainWindow::MainWindow()
 {
 	m_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(m_window), "jamail");
+	gtk_window_set_default_size(GTK_WINDOW(m_window), 300, 300);
 	gtk_container_set_border_width(GTK_CONTAINER(m_window), 4);
 	g_signal_connect(G_OBJECT(m_window), "delete_event",
 			 G_CALLBACK(gtk_main_quit), NULL);
@@ -672,15 +674,26 @@ MainWindow::MainWindow()
 				   G_TYPE_STRING);
 	messages_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
 
-	GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
-	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
-		-1, "ID", renderer, "text", COL_ID, NULL);
-	renderer = gtk_cell_renderer_text_new();
-	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
-		-1, "From", renderer, "text", COL_FROM, NULL);
-	renderer = gtk_cell_renderer_text_new();
-	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(messages_view),
-		-1, "Subject", renderer, "text", COL_SUBJECT, NULL);
+	const struct {
+		int id;
+		const char *title;
+	} columns[] = {
+		{COL_ID, "ID"},
+		{COL_FROM, "From"},
+		{COL_SUBJECT, "Subject"},
+		{-1, NULL}
+	};
+
+	for (int i = 0; columns[i].title; ++i) {
+		GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+		GtkTreeViewColumn *column =
+			gtk_tree_view_column_new_with_attributes(
+				columns[i].title, renderer, "text",
+				columns[i].id, NULL);
+		gtk_tree_view_column_set_resizable(column, TRUE);
+		gtk_tree_view_insert_column(GTK_TREE_VIEW(messages_view),
+					    column, -1);
+	}
 
 	GtkWidget *scrollwin = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollwin),
@@ -690,6 +703,11 @@ MainWindow::MainWindow()
 	gtk_container_add(GTK_CONTAINER(m_window), scrollwin);
 
 	gtk_widget_show_all(m_window);
+}
+
+MainWindow::~MainWindow()
+{
+	gtk_widget_destroy(m_window);
 }
 
 int main(int argc, char **argv)
