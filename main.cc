@@ -32,12 +32,14 @@ std::list<Account *> accounts;
 bool debug_enabled = false;
 
 GtkWidget *messages_view;
+GtkWidget *text_view;
 
 /* columns of the message list */
 enum {
 	COL_ID,
 	COL_FROM,
 	COL_SUBJECT,
+	COL_ACCOUNT,
 	MAX_COL
 };
 
@@ -50,7 +52,7 @@ public:
 	{}
 };
 
-class imap_need_more: std::exception {
+class imap_need_more: public std::exception {
 public:
 	imap_need_more() {}
 };
@@ -80,6 +82,7 @@ public:
 	~Account();
 
 	void connect();
+	void fetch_message(int id);
 
 private:
 	enum {
@@ -87,7 +90,8 @@ private:
 		S_CONNECTING,
 		S_LOGIN,
 		S_SELECT,
-		S_FETCH
+		S_FETCH,
+		S_FETCH_BODY
 	} m_state;
 
 	std::string m_server;
@@ -127,6 +131,10 @@ public:
 
 private:
 	GtkWidget *m_window;
+
+	/* GTK callbacks */
+	static void message_clicked(GtkTreeView *tree_view, GtkTreePath *path,
+				    GtkTreeViewColumn *column, gpointer ptr);
 };
 
 namespace {
@@ -202,7 +210,8 @@ void expect(std::istream &is, char token)
 
 bool is_atom(int c)
 {
-	return !isspace(c) && c != '(' && c != ')' && c != '{';
+	return !isspace(c) && c != '(' && c != ')' && c != '{' && c != '['
+		&& c != ']';
 }
 
 /* read an IMAP string (consisting of atom characters) */
@@ -392,6 +401,25 @@ void parse_body_struct(std::istream &parser)
 	expect(parser, ')');
 }
 
+std::string parse_body_reply(std::istream &parser)
+{
+	expect(parser, '(');
+
+	std::string body = parse_astring(parser);
+	if (body != "BODY") {
+		throw imap_parse_error("Expected BODY");
+	}
+
+	expect(parser, '[');
+	std::string text = parse_astring(parser);
+	if (text != "TEXT") {
+		throw imap_parse_error("Expected TEXT");
+	}
+	expect(parser, ']');
+
+	return parse_string(parser);
+}
+
 Envelope parse_fetch_reply(std::istream &parser)
 {
 	Envelope envelope;
@@ -534,6 +562,12 @@ void Account::connect()
 	}
 }
 
+void Account::fetch_message(int id)
+{
+	send_command(strf("FETCH %d BODY[TEXT]", id));
+	m_state = S_FETCH_BODY;
+}
+
 void Account::send_command(const std::string &cmd)
 {
 	m_send_buf += strf("%d ", m_next_cmd_id) + cmd + "\r\n";
@@ -613,8 +647,12 @@ size_t Account::process_recv(const std::string &buf)
 				m_state = S_IDLE;
 
 			} else {
-				std::string id, status;
-				parser >> id >> status;
+				int id;
+				parser >> id;
+				if (!parser) {
+					throw imap_parse_error("Invalid message ID");
+				}
+				std::string status = parse_astring(parser);
 
 				Envelope env;
 				/* TODO: write a proper parser */
@@ -626,17 +664,44 @@ size_t Account::process_recv(const std::string &buf)
 					printf("\"%s\"\n", line.c_str());
 				}
 
-				GtkListStore *store =
-					GTK_LIST_STORE(gtk_tree_view_get_model(
-						GTK_TREE_VIEW(messages_view)));
+				GtkTreeModel *model =
+					gtk_tree_view_get_model(
+						GTK_TREE_VIEW(messages_view));
 
 				GtkTreeIter iter;
-				gtk_list_store_append(store, &iter);
-				gtk_list_store_set(store, &iter,
-					COL_ID, id.c_str(),
+				gtk_list_store_append(GTK_LIST_STORE(model),
+						      &iter);
+				gtk_list_store_set(GTK_LIST_STORE(model), &iter,
+					COL_ID, id,
 					COL_FROM, env.from.front().email.c_str(),
 					COL_SUBJECT, env.subject.c_str(),
+					COL_ACCOUNT, this,
 					-1);
+			}
+			break;
+
+		case S_FETCH_BODY:
+			if (!untagged) {
+				std::string status;
+				parser >> status;
+				if (status != "OK") {
+					throw std::runtime_error("Unable to fetch");
+				}
+				m_state = S_IDLE;
+			} else {
+				int id;
+				parser >> id;
+				if (!parser) {
+					throw imap_parse_error("Invalid message ID");
+				}
+				std::string status = parse_astring(parser);
+
+				std::string body = parse_body_reply(parser);
+
+				GtkTextBuffer *buf = gtk_text_view_get_buffer(
+					GTK_TEXT_VIEW(text_view));
+				gtk_text_buffer_set_text(buf, body.data(),
+							 body.size());
 			}
 			break;
 
@@ -761,10 +826,14 @@ Main_Window::Main_Window()
 	g_signal_connect(G_OBJECT(m_window), "delete_event",
 			 G_CALLBACK(gtk_main_quit), NULL);
 
+	GtkWidget *vbox = gtk_vbox_new(FALSE, 4);
+
 	GtkListStore *store =
-		gtk_list_store_new(MAX_COL, G_TYPE_STRING, G_TYPE_STRING,
-				   G_TYPE_STRING);
+		gtk_list_store_new(MAX_COL, G_TYPE_INT, G_TYPE_STRING,
+				   G_TYPE_STRING, G_TYPE_POINTER);
 	messages_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+	g_signal_connect(G_OBJECT(messages_view), "row-activated",
+			 G_CALLBACK(message_clicked), NULL);
 
 	const struct {
 		int id;
@@ -791,8 +860,21 @@ Main_Window::Main_Window()
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollwin),
 		GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 	gtk_container_add(GTK_CONTAINER(scrollwin), messages_view);
+	gtk_box_pack_start(GTK_BOX(vbox), scrollwin, TRUE, TRUE, 0);
 
-	gtk_container_add(GTK_CONTAINER(m_window), scrollwin);
+	text_view = gtk_text_view_new();
+	PangoFontDescription *font_desc =
+		pango_font_description_from_string("monospace 10");
+        gtk_widget_modify_font(text_view, font_desc);
+        pango_font_description_free(font_desc);
+
+	scrollwin = gtk_scrolled_window_new(NULL, NULL);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollwin),
+		GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+	gtk_container_add(GTK_CONTAINER(scrollwin), text_view);
+	gtk_box_pack_start(GTK_BOX(vbox), scrollwin, TRUE, TRUE, 0);
+
+	gtk_container_add(GTK_CONTAINER(m_window), vbox);
 
 	gtk_widget_show_all(m_window);
 }
@@ -800,6 +882,24 @@ Main_Window::Main_Window()
 Main_Window::~Main_Window()
 {
 	gtk_widget_destroy(m_window);
+}
+
+void Main_Window::message_clicked(GtkTreeView *tree_view, GtkTreePath *path,
+				  GtkTreeViewColumn *column, gpointer ptr)
+{
+	UNUSED(column);
+
+	Main_Window *self = (Main_Window *) ptr;
+
+	GtkTreeModel *model = gtk_tree_view_get_model(tree_view);
+
+	GtkTreeIter iter;
+	int id;
+	Account *acc = NULL;
+	gtk_tree_model_get_iter(model, &iter, path);
+	gtk_tree_model_get(model, &iter, COL_ID, &id, COL_ACCOUNT, &acc, -1);
+
+	acc->fetch_message(id);
 }
 
 int main(int argc, char **argv)
