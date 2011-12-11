@@ -280,6 +280,13 @@ std::string parse_string(std::istream &is)
 		/* a quoted string */
 		char c = is.get();
 		while (is && c != '"') {
+			if (c == '\\') {
+				/* Escaped char, used by Gmail's IMAP server */
+				c = is.get();
+				if (!is || !(c == '"' || c == '\\')) {
+					throw std::runtime_error("Invalid escaped char");
+				}
+			}
 			out += c;
 			c = is.get();
 		}
