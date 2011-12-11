@@ -55,21 +55,20 @@ public:
 	imap_need_more() {}
 };
 
-struct HeaderAddress {
+struct Header_Address {
 	std::string name;
 	std::string email;
 };
 
-struct Headers {
-	size_t size;
+struct Envelope {
 	std::string date;
 	std::string subject;
-	std::list<HeaderAddress> from;
-	std::list<HeaderAddress> sender;
-	std::list<HeaderAddress> reply_to;
-	std::list<HeaderAddress> to;
-	std::list<HeaderAddress> cc;
-	std::list<HeaderAddress> bcc;
+	std::list<Header_Address> from;
+	std::list<Header_Address> sender;
+	std::list<Header_Address> reply_to;
+	std::list<Header_Address> to;
+	std::list<Header_Address> cc;
+	std::list<Header_Address> bcc;
 	std::string parent_id;
 	std::string message_id;
 };
@@ -102,7 +101,10 @@ private:
 	std::string m_recv_buf;
 	GIOChannel *m_iochannel;
 	bool m_logged_in;
+	int m_next_cmd_id;
+	int m_next_reply_id;
 
+	void send_command(const std::string &cmd);
 	size_t process_recv(const std::string &buf);
 	void ssl_handle_error(int ret);
 	void install_write_watch();
@@ -118,10 +120,10 @@ private:
 	DISABLE_COPY_AND_ASSIGN(Account);
 };
 
-class MainWindow {
+class Main_Window {
 public:
-	MainWindow();
-	~MainWindow();
+	Main_Window();
+	~Main_Window();
 
 private:
 	GtkWidget *m_window;
@@ -167,7 +169,7 @@ int set_nonblock(int fd, bool enabled)
 	return fcntl(fd, F_SETFL, flags);
 }
 
-/* if the next token is the given one, skip it */
+/* check whether the next token is the given one */
 bool check(std::istream &is, char token)
 {
 	/* skip leading space */
@@ -176,7 +178,12 @@ bool check(std::istream &is, char token)
 		is.get();
 		c = is.peek();
 	}
-	if (is && c == token) {
+	return (is && c == token);
+}
+
+bool skip(std::istream &is, char token)
+{
+	if (check(is, token)) {
 		is.get();
 		return true;
 	}
@@ -221,7 +228,9 @@ std::string parse_astring(std::istream &is)
 /* read a quoted or a literal IMAP string */
 std::string parse_string(std::istream &is)
 {
-	if (check(is, '{')) {
+	std::string out;
+
+	if (skip(is, '{')) {
 		/* a literal string, with length of the string as a prefix */
 		size_t length;
 		is >> length;
@@ -253,16 +262,13 @@ std::string parse_string(std::istream &is)
 			throw imap_parse_error("Expected an LF");
 		}
 
-		std::string out(length, 0);
+		out.resize(length, 0);
 		if (!is.read(&out[0], length)) {
 			throw imap_need_more();
 		}
-		return out;
-	}
 
-	if (check(is, '"')) {
+	} else if (skip(is, '"')) {
 		/* a quoted string */
-		std::string out;
 		char c = is.get();
 		while (is && c != '"') {
 			out += c;
@@ -272,14 +278,154 @@ std::string parse_string(std::istream &is)
 			throw imap_parse_error("Unterminated string");
 		}
 		return out;
-	}
 
-	/* handle NIL */
-	std::string nil = parse_astring(is);
-	if (nil != "NIL") {
-		throw imap_parse_error("Not an address list or a NIL");
+	} else {
+		/* handle NIL */
+		std::string nil = parse_astring(is);
+		if (nil != "NIL") {
+			throw imap_parse_error("Not a string or a NIL");
+		}
 	}
-	return "";
+	return out;
+}
+
+std::list<Header_Address> parse_address_list(std::istream &parser)
+{
+	std::list<Header_Address> addresses;
+	if (skip(parser, '(')) {
+		while (!skip(parser, ')')) {
+			expect(parser, '(');
+			Header_Address addr;
+			addr.name = parse_string(parser);
+			parse_string(parser); /* ignored */
+			std::string mailbox = parse_string(parser);
+			std::string host = parse_string(parser);
+			addr.email = mailbox + "@" + host;
+			addresses.push_back(addr);
+			expect(parser, ')');
+		}
+	} else {
+		/* handle NIL */
+		std::string nil = parse_astring(parser);
+		if (nil != "NIL") {
+			throw imap_parse_error("Not an address list or a NIL");
+		}
+	}
+	return addresses;
+}
+
+Envelope parse_envelope(std::istream &parser)
+{
+	Envelope env;
+	expect(parser, '(');
+	env.date = parse_string(parser);
+	env.subject = parse_string(parser);
+	env.from = parse_address_list(parser);
+	env.sender = parse_address_list(parser);
+	env.reply_to = parse_address_list(parser);
+	env.to = parse_address_list(parser);
+	env.cc = parse_address_list(parser);
+	env.bcc = parse_address_list(parser);
+	env.parent_id = parse_string(parser);
+	env.message_id = parse_string(parser);
+	expect(parser, ')');
+	return env;
+}
+
+void parse_body_struct(std::istream &parser)
+{
+	expect(parser, '(');
+
+	if (check(parser, '(')) {
+		/* a sequence of nested body structures */
+		while (check(parser, '(')) {
+			parse_body_struct(parser);
+		}
+		std::string subtype = parse_string(parser);
+
+	} else {
+		std::string type = parse_string(parser);
+		std::string subtype = parse_string(parser);
+
+		/* parameter list */
+		if (skip(parser, '(')) {
+			while (!skip(parser, ')')) {
+				std::string key = parse_string(parser);
+				std::string val = parse_string(parser);
+			}
+		} else {
+			/* handle NIL */
+			std::string nil = parse_astring(parser);
+			if (nil != "NIL") {
+				throw imap_parse_error("Not a param list or a NIL");
+			}
+		}
+
+		std::string id = parse_string(parser);
+		std::string descr = parse_string(parser);
+		std::string encoding = parse_string(parser);
+
+		size_t size;
+		parser >> size; /* ignored */
+		if (!parser) {
+			throw imap_parse_error("Invalid body part size");
+		}
+
+		if (type == "TEXT") {
+			size_t nlines;
+			parser >> nlines; /* ignored */
+			if (!parser) {
+				throw imap_parse_error("Invalid number of lines");
+			}
+
+		} else if (type == "MESSAGE" && subtype == "RFC822") {
+			parse_envelope(parser); /* ignored */
+			parse_body_struct(parser); /* ignored */
+
+			size_t nlines;
+			parser >> nlines; /* ignored */
+			if (!parser) {
+				throw imap_parse_error("Invalid number of lines");
+			}
+		}
+	}
+	expect(parser, ')');
+}
+
+Envelope parse_fetch_reply(std::istream &parser)
+{
+	Envelope envelope;
+	expect(parser, '(');
+	while (!skip(parser, ')')) {
+		std::string type = parse_astring(parser);
+
+		if (type == "INTERNALDATE") {
+			std::string date = parse_string(parser);
+
+		} else if (type == "RFC822.SIZE") {
+			size_t size;
+			parser >> size; /* ignored */
+			if (!parser) {
+				throw imap_parse_error("Invalid msg size");
+			}
+
+		} else if (type == "FLAGS") {
+			expect(parser, '(');
+			while (!skip(parser, ')')) {
+				std::string flag = parse_astring(parser);
+			}
+
+		} else if (type == "ENVELOPE") {
+			envelope = parse_envelope(parser);
+
+		} else if (type == "BODY") {
+			parse_body_struct(parser); /* ignored */
+
+		} else {
+			debug("unknown fetch field: %s\n", type.c_str());
+		}
+	}
+	return envelope;
 }
 
 void load_config(const char *fname)
@@ -322,7 +468,9 @@ Account::Account(const std::string &server, const std::string &user,
 	m_conn(NULL),
 	m_watch(INVALID_GTK_WATCH),
 	m_write_watch(INVALID_GTK_WATCH),
-	m_logged_in(false)
+	m_logged_in(false),
+	m_next_cmd_id(1),
+	m_next_reply_id(1)
 {
 }
 
@@ -386,72 +534,11 @@ void Account::connect()
 	}
 }
 
-std::list<HeaderAddress> parse_address_list(std::istream &parser)
+void Account::send_command(const std::string &cmd)
 {
-	if (check(parser, '(')) {
-		std::list<HeaderAddress> addresses;
-		while (!check(parser, ')')) {
-			expect(parser, '(');
-			HeaderAddress addr;
-			addr.name = parse_string(parser);
-			parse_string(parser); /* ignored */
-			std::string mailbox = parse_string(parser);
-			std::string host = parse_string(parser);
-			addr.email = mailbox + "@" + host;
-			addresses.push_back(addr);
-			expect(parser, ')');
-		}
-		return addresses;
-	}
-
-	/* handle NIL */
-	std::string nil = parse_astring(parser);
-	if (nil != "NIL") {
-		throw imap_parse_error("Not a string or a NIL");
-	}
-	return std::list<HeaderAddress>();
-}
-
-void parse_fetch_headers(Headers *headers, std::istream &parser)
-{
-	expect(parser, '(');
-	while (!check(parser, ')')) {
-		std::string type = parse_astring(parser);
-
-		if (type == "INTERNALDATE") {
-			std::string date = parse_string(parser);
-
-		} else if (type == "RFC822.SIZE") {
-			parser >> headers->size;
-
-		} else if (type == "FLAGS") {
-			expect(parser, '(');
-			while (!check(parser, ')')) {
-				std::string flag = parse_astring(parser);
-			}
-
-		} else if (type == "ENVELOPE") {
-			expect(parser, '(');
-			headers->date = parse_string(parser);
-			headers->subject = parse_string(parser);
-			headers->from = parse_address_list(parser);
-			headers->sender = parse_address_list(parser);
-			headers->reply_to = parse_address_list(parser);
-			headers->to = parse_address_list(parser);
-			headers->cc = parse_address_list(parser);
-			headers->bcc = parse_address_list(parser);
-			headers->parent_id = parse_string(parser);
-			headers->message_id = parse_string(parser);
-			expect(parser, ')');
-
-		} else if (type == "BODY") {
-			/* TODO: just ignore the rest.. */
-			return;
-
-		} else {
-			debug("unknown fetch field: %s\n", type.c_str());
-		}
-	}
+	m_send_buf += strf("%d ", m_next_cmd_id) + cmd + "\r\n";
+	m_next_cmd_id++;
+	try_write();
 }
 
 size_t Account::process_recv(const std::string &buf)
@@ -469,8 +556,16 @@ size_t Account::process_recv(const std::string &buf)
 		/* debug("RECV: %s\n", line.c_str()); */
 
 		std::istringstream parser(line);
-		std::string id;
-		parser >> id;
+		bool untagged = true;
+		if (!skip(parser, '*')) {
+			untagged = false;
+			int id;
+			parser >> id;
+			if (!parser || id != m_next_reply_id) {
+				throw imap_parse_error("Invalid reply ID");
+			}
+			m_next_reply_id++;
+		}
 
 		switch (m_state) {
 		case S_IDLE:
@@ -478,41 +573,38 @@ size_t Account::process_recv(const std::string &buf)
 
 		case S_CONNECTING:
 			/* send credentials */
-			m_send_buf += strf(". LOGIN %s %s\r\n",
-					   m_user.c_str(), m_pw.c_str());
-			try_write();
+			send_command(strf("LOGIN %s %s",
+				     m_user.c_str(), m_pw.c_str()));
 			m_state = S_LOGIN;
 			break;
 
 		case S_LOGIN:
-			if (id == ".") {
+			if (!untagged) {
 				std::string status;
 				parser >> status;
 				if (status != "OK") {
 					throw std::runtime_error("Unable to log in");
 				}
 				debug("logged in\n");
-				m_send_buf += ". SELECT INBOX\r\n";
-				try_write();
+				send_command("SELECT INBOX");
 				m_state = S_SELECT;
 			}
 			break;
 
 		case S_SELECT:
-			if (id == ".") {
+			if (!untagged) {
 				std::string status;
 				parser >> status;
 				if (status != "OK") {
 					throw std::runtime_error("Unable to select");
 				}
-				m_send_buf += ". FETCH 1:* full\r\n";
-				try_write();
+				send_command("FETCH 1:* full");
 				m_state = S_FETCH;
 			}
 			break;
 
 		case S_FETCH:
-			if (id == ".") {
+			if (!untagged) {
 				std::string status;
 				parser >> status;
 				if (status != "OK") {
@@ -520,14 +612,14 @@ size_t Account::process_recv(const std::string &buf)
 				}
 				m_state = S_IDLE;
 
-			} else if (id == "*") {
+			} else {
 				std::string id, status;
 				parser >> id >> status;
 
-				Headers headers;
+				Envelope env;
 				/* TODO: write a proper parser */
 				try {
-					parse_fetch_headers(&headers, parser);
+					env = parse_fetch_reply(parser);
 				} catch (const imap_parse_error &e) {
 					printf("IMAP parse error: %s\n",
 						e.what());
@@ -542,8 +634,8 @@ size_t Account::process_recv(const std::string &buf)
 				gtk_list_store_append(store, &iter);
 				gtk_list_store_set(store, &iter,
 					COL_ID, id.c_str(),
-					COL_FROM, headers.from.front().email.c_str(),
-					COL_SUBJECT, headers.subject.c_str(),
+					COL_FROM, env.from.front().email.c_str(),
+					COL_SUBJECT, env.subject.c_str(),
 					-1);
 			}
 			break;
@@ -660,7 +752,7 @@ int Account::write_ready(GIOChannel *io, GIOCondition cond, gpointer ptr)
 	return TRUE;
 }
 
-MainWindow::MainWindow()
+Main_Window::Main_Window()
 {
 	m_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(m_window), "jamail");
@@ -705,7 +797,7 @@ MainWindow::MainWindow()
 	gtk_widget_show_all(m_window);
 }
 
-MainWindow::~MainWindow()
+Main_Window::~Main_Window()
 {
 	gtk_widget_destroy(m_window);
 }
@@ -730,7 +822,7 @@ try {
 	std::string path = strf("%s/.jamail", getenv("HOME"));
 	load_config(path.c_str());
 
-	MainWindow mw;
+	Main_Window mw;
 
 	for (const_list_iter<Account *> i(accounts); i; i.next()) {
 		Account *acc = *i;
