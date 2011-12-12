@@ -767,17 +767,19 @@ void Account::remove_write_watch()
 
 void Account::try_read()
 {
-	size_t pos = m_recv_buf.size();
-	m_recv_buf.resize(pos + 2048);
-	int got = SSL_read(m_conn, &m_recv_buf[pos], 2048);
-	if (got <= 0) {
-		m_recv_buf.resize(pos);
-		ssl_handle_error(got);
-		return;
+	while (1) {
+		size_t pos = m_recv_buf.size();
+		m_recv_buf.resize(pos + 4096);
+		int got = SSL_read(m_conn, &m_recv_buf[pos], 4096);
+		if (got <= 0) {
+			m_recv_buf.resize(pos);
+			ssl_handle_error(got);
+			return;
+		}
+		m_recv_buf.resize(pos + got);
+		size_t i = process_recv(m_recv_buf);
+		m_recv_buf.erase(m_recv_buf.begin(), m_recv_buf.begin() + i);
 	}
-	m_recv_buf.resize(pos + got);
-	size_t i = process_recv(m_recv_buf);
-	m_recv_buf.erase(m_recv_buf.begin(), m_recv_buf.begin() + i);
 }
 
 void Account::try_write()
@@ -840,7 +842,7 @@ Main_Window::Main_Window()
 				   G_TYPE_STRING, G_TYPE_POINTER);
 	messages_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
 	g_signal_connect(G_OBJECT(messages_view), "row-activated",
-			 G_CALLBACK(message_clicked), NULL);
+			 G_CALLBACK(message_clicked), this);
 
 	const struct {
 		int id;
@@ -897,6 +899,7 @@ void Main_Window::message_clicked(GtkTreeView *tree_view, GtkTreePath *path,
 	UNUSED(column);
 
 	Main_Window *self = (Main_Window *) ptr;
+	UNUSED(self);
 
 	GtkTreeModel *model = gtk_tree_view_get_model(tree_view);
 
