@@ -21,22 +21,22 @@ public:
 };
 
 struct Header_Address {
-	std::string name;
-	std::string email;
+	ustring name;
+	ustring email;
 };
 
 struct Envelope {
 	int id;
-	std::string date;
-	std::string subject;
+	ustring date;
+	ustring subject;
 	std::list<Header_Address> from;
 	std::list<Header_Address> sender;
 	std::list<Header_Address> reply_to;
 	std::list<Header_Address> to;
 	std::list<Header_Address> cc;
 	std::list<Header_Address> bcc;
-	std::string parent_id;
-	std::string message_id;
+	ustring parent_id;
+	ustring message_id;
 };
 
 class IMAP {
@@ -44,6 +44,8 @@ public:
 	IMAP(const std::string &server, const std::string &user,
 	     const std::string &pw);
 	~IMAP();
+
+	std::string server() const { return m_server; }
 
 	void connect();
 	void fetch_message(int id);

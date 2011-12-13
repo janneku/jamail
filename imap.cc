@@ -151,11 +151,11 @@ std::list<Header_Address> parse_address_list(std::istream &parser)
 		while (!skip(parser, ')')) {
 			expect(parser, '(');
 			Header_Address addr;
-			addr.name = parse_string(parser);
+			addr.name = to_unicode(parse_string(parser));
 			parse_string(parser); /* ignored */
 			std::string mailbox = parse_string(parser);
 			std::string host = parse_string(parser);
-			addr.email = mailbox + "@" + host;
+			addr.email = to_unicode(mailbox + "@" + host);
 			addresses.push_back(addr);
 			expect(parser, ')');
 		}
@@ -173,16 +173,16 @@ Envelope parse_envelope(std::istream &parser)
 {
 	Envelope env;
 	expect(parser, '(');
-	env.date = parse_string(parser);
-	env.subject = parse_string(parser);
+	env.date = to_unicode(parse_string(parser));
+	env.subject = to_unicode(parse_string(parser));
 	env.from = parse_address_list(parser);
 	env.sender = parse_address_list(parser);
 	env.reply_to = parse_address_list(parser);
 	env.to = parse_address_list(parser);
 	env.cc = parse_address_list(parser);
 	env.bcc = parse_address_list(parser);
-	env.parent_id = parse_string(parser);
-	env.message_id = parse_string(parser);
+	env.parent_id = to_unicode(parse_string(parser));
+	env.message_id = to_unicode(parse_string(parser));
 	expect(parser, ')');
 	return env;
 }

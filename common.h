@@ -2,6 +2,8 @@
 #define _COMMON_H
 
 #include <stdio.h>
+#include <string>
+#include <stdint.h>
 
 #define APP_NAME	"jamail"
 #define UNUSED(x)	((void) (x))
@@ -17,5 +19,8 @@
 	} while (0)
 
 extern bool debug_enabled;
+
+/* An unicode string (UTF-32) */
+typedef std::basic_string<uint32_t> ustring;
 
 #endif

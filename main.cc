@@ -6,16 +6,23 @@
  * Program code is licensed with GNU LGPL 2.1. See COPYING.LGPL file.
  */
 #include "utils.h"
+#include "imap.h"
+#include "json.h"
+#include "encoding.h"
 #include "common.h"
 #include "imap.h"
+#include <dirent.h>
 #include <gtk/gtk.h>
 #include <assert.h>
+#include <sys/stat.h>
 #include <fstream>
 #include <sstream>
 
 bool debug_enabled = false;
 
 namespace {
+
+std::string cache_path;
 
 std::list<IMAP *> accounts;
 
@@ -194,20 +201,122 @@ void Main_Window::message_clicked(GtkTreeView *tree_view, GtkTreePath *path,
 	acc->fetch_message(id);
 }
 
-void add_message(IMAP *account, const Envelope *env)
+std::list<Header_Address> parse_address_list(const JSON_Value &value)
+{
+	std::list<JSON_Value> array = value.array();
+	std::list<Header_Address> out;
+	for (const_list_iter<JSON_Value> i(array); i; i.next()) {
+		Header_Address addr;
+		addr.name = i->get("name").to_string();
+		addr.email = i->get("email").to_string();
+		out.push_back(addr);
+	}
+	return out;
+}
+
+JSON_Value json_address_list(const std::list<Header_Address> &list)
+{
+	JSON_Value out(JSON_Value::ARRAY);
+	for (const_list_iter<Header_Address> i(list); i; i.next()) {
+		JSON_Value addr(JSON_Value::OBJECT);
+		addr.insert("name", JSON_Value(i->name));
+		addr.insert("email", JSON_Value(i->email));
+		out.push_back(addr);
+	}
+	return out;
+}
+
+void add_message_to_list(IMAP *account, const Envelope *env)
 {
 	GtkTreeModel *model =
 		gtk_tree_view_get_model(GTK_TREE_VIEW(messages_view));
+
+	/* GTK wants UTF-8 */
+	std::string from = "?";
+	if (!env->from.empty()) {
+		encode(env->from.front().email, "UTF-8");
+	}
+	std::string subject = encode(env->subject, "UTF-8");
 
 	GtkTreeIter iter;
 	gtk_list_store_append(GTK_LIST_STORE(model),
 			      &iter);
 	gtk_list_store_set(GTK_LIST_STORE(model), &iter,
 		COL_ID, env->id,
-		COL_FROM, env->from.front().email.c_str(),
-		COL_SUBJECT, env->subject.c_str(),
+		COL_FROM, from.c_str(),
+		COL_SUBJECT, subject.c_str(),
 		COL_ACCOUNT, account,
 		-1);
+}
+
+void add_message(IMAP *account, const Envelope *env)
+{
+	/* Serialize the headers of the message with JSON */
+	JSON_Value message(JSON_Value::OBJECT);
+	message.insert(to_unicode("sender"), json_address_list(env->sender));
+	message.insert(to_unicode("from"), json_address_list(env->from));
+	message.insert(to_unicode("to"), json_address_list(env->to));
+	message.insert(to_unicode("cc"), json_address_list(env->cc));
+	message.insert(to_unicode("bcc"), json_address_list(env->bcc));
+	message.insert(to_unicode("reply_to"), json_address_list(env->reply_to));
+	message.insert(to_unicode("subject"), env->subject);
+
+	std::string buf = encode(message.serialize(), "UTF-8");
+	std::string fname = cache_path + '/' + account->server() +
+			    strf("/%d", env->id);
+	std::ofstream f(fname.c_str(), std::ofstream::binary);
+	f << buf;
+	f.close();
+
+	add_message_to_list(account, env);
+}
+
+void load_cache(IMAP *account)
+{
+	std::string path = cache_path + '/' + account->server();
+	DIR *dir = opendir(path.c_str());
+	if (dir == NULL)
+		return;
+	while (1) {
+		dirent *de = readdir(dir);
+		if (de == NULL)
+			break;
+		if (de->d_name[0] == '.')
+			continue;
+
+		std::string fname = path + '/' + de->d_name;
+		std::ifstream f(fname.c_str(), std::ifstream::binary);
+		if (!f) {
+			debug("Can not open %s\n", fname.c_str());
+			continue;
+		}
+
+		std::string buf;
+		while (1) {
+			size_t pos = buf.size();
+			buf.resize(pos + 4096, 0);
+			if (!f.read(&buf[pos], 4096)) {
+				buf.resize(pos + f.gcount());
+				break;
+			}
+		}
+
+		std::basic_istringstream<uint32_t> parser(decode(buf, "UTF-8"));
+		JSON_Value val;
+		val.load(parser);
+
+		Envelope env;
+		env.subject = val.get("subject").to_string();
+		env.sender = parse_address_list(val.get("sender"));
+		env.from = parse_address_list(val.get("from"));
+		env.to = parse_address_list(val.get("to"));
+		env.cc = parse_address_list(val.get("cc"));
+		env.bcc = parse_address_list(val.get("bcc"));
+		env.reply_to = parse_address_list(val.get("reply_to"));
+
+		add_message_to_list(account, &env);
+	}
+	closedir(dir);
 }
 
 void show_message(const std::string &body)
@@ -236,10 +345,18 @@ try {
 	std::string path = strf("%s/.jamail", getenv("HOME"));
 	load_config(path.c_str());
 
+	cache_path = strf("%s/.cache/jamail", getenv("HOME"));
+	mkdir(cache_path.c_str(), 0700);
+
 	Main_Window mw;
 
 	for (const_list_iter<IMAP *> i(accounts); i; i.next()) {
 		IMAP *acc = *i;
+
+		std::string path = cache_path + '/' + acc->server();
+		mkdir(path.c_str(), 0700);
+
+		load_cache(acc);
 		acc->connect();
 	}
 

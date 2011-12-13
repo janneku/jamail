@@ -4,13 +4,12 @@
 #ifndef _UTILS_H
 #define _UTILS_H
 
-#include <stdio.h>
+#include "common.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <list>
 #include <map>
 #include <set>
-#include <string>
 #include <sstream>
 #include <stdexcept>
 
@@ -320,5 +319,11 @@ Value getdefault(const std::map<Key, Value> &map, const Key &key,
 		return def;
 	return i->second;
 }
+
+/*
+ * FAST conversion from ASCII to unicode. Invalid characters are replaced
+ * with '?'.
+ */
+ustring to_unicode(const std::string &s);
 
 #endif
