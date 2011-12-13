@@ -253,13 +253,14 @@ void add_message(IMAP *account, const Envelope *env)
 {
 	/* Serialize the headers of the message with JSON */
 	JSON_Value message(JSON_Value::OBJECT);
+	message.insert(to_unicode("subject"), env->subject);
+	message.insert(to_unicode("date"), env->date);
 	message.insert(to_unicode("sender"), json_address_list(env->sender));
 	message.insert(to_unicode("from"), json_address_list(env->from));
 	message.insert(to_unicode("to"), json_address_list(env->to));
 	message.insert(to_unicode("cc"), json_address_list(env->cc));
 	message.insert(to_unicode("bcc"), json_address_list(env->bcc));
 	message.insert(to_unicode("reply_to"), json_address_list(env->reply_to));
-	message.insert(to_unicode("subject"), env->subject);
 
 	std::string buf = encode(message.serialize(), "UTF-8");
 	std::string fname = cache_path + '/' + account->server() +
@@ -307,6 +308,7 @@ void load_cache(IMAP *account)
 
 		Envelope env;
 		env.subject = val.get("subject").to_string();
+		env.date = val.get("date").to_string();
 		env.sender = parse_address_list(val.get("sender"));
 		env.from = parse_address_list(val.get("from"));
 		env.to = parse_address_list(val.get("to"));
