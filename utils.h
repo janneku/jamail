@@ -14,16 +14,6 @@
 #include <sstream>
 #include <stdexcept>
 
-#define DISABLE_COPY_AND_ASSIGN(type)	\
-	private: \
-		type(const type &from); \
-		void operator =(const type &from)
-
-#define debug(...)	do { \
-	if (debug_enabled) \
-		printf("DEBUG: " __VA_ARGS__); \
-	} while (0)
-
 extern inline std::string strf(const char *fmt, ...)
 {
 	va_list args;

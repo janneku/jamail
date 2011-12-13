@@ -1,4 +1,4 @@
-OBJ = main.o
+OBJ = main.o imap.o ioutils.o
 BINARY = jamail
 CXXFLAGS = -O2 -Wextra -Wall `pkg-config gtk+-2.0 --cflags` -ansi -pedantic \
 	-Wno-variadic-macros
