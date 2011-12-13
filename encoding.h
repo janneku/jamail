@@ -1,8 +1,10 @@
 #ifndef _ENCODING_H
 #define _ENCODING_H
 
-#include "common.h"
 #include <stdexcept>
+#include <stdint.h>
+
+typedef std::basic_string<uint32_t> ustring;
 
 class conv_error: public std::runtime_error {
 public:

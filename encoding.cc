@@ -1,9 +1,11 @@
 /*
- * jamail - Just another mail client
+ * A small JSON parser and serializer.
  *
  * Copyright 2011 Janne Kulmala <janne.t.kulmala@iki.fi>
  *
- * Program code is licensed with GNU LGPL 2.1. See COPYING.LGPL file.
+ * See LICENSE file for license.
+ *
+ * Methods for converting encoding and decoding unicode strings (using iconv)
  */
 #include "encoding.h"
 #include <assert.h>

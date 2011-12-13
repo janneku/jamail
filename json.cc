@@ -1,12 +1,14 @@
 /*
- * jamail - Just another mail client
+ * A small JSON parser and serializer.
  *
  * Copyright 2011 Janne Kulmala <janne.t.kulmala@iki.fi>
  *
- * Program code is licensed with GNU LGPL 2.1. See COPYING.LGPL file.
+ * See LICENSE file for license.
  */
 #include "json.h"
-#include "utils.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <sstream>
 #include <assert.h>
 
 namespace {
@@ -24,16 +26,45 @@ const char *type_names[] = {
 	NULL
 };
 
+/*
+ * FAST conversion from ASCII to unicode. Invalid characters are replaced
+ * with '?'.
+ */
+ustring to_unicode(const std::string &in)
+{
+	ustring out(in.size(), 0);
+	for (size_t i = 0; i < in.size(); ++i) {
+		unsigned char c = in[i];
+		if (c >= 128) {
+			c = '?';
+		}
+		out[i] = c;
+	}
+	return out;
+}
+
+std::string strf(const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	char buffer[1024];
+	if (vsnprintf(buffer, sizeof buffer, fmt, args) >= int(sizeof buffer)) {
+		throw std::runtime_error("strf() buffer overflow");
+	}
+	va_end(args);
+	return buffer;
+}
+
 /* check whether the next token is the given one */
 bool check(std::basic_istream<uint32_t> &is, char token)
 {
 	/* skip leading space */
 	unsigned int c = is.peek();
-	while (is && isspace(c)) {
+	while (!is.eof() && isspace(c)) {
 		is.get();
 		c = is.peek();
 	}
-	return (is && c == (unsigned int) token);
+	return (!is.eof() && c == (unsigned int) token);
 }
 
 bool skip(std::basic_istream<uint32_t> &is, char token)
@@ -53,24 +84,86 @@ void expect(std::basic_istream<uint32_t> &is, char token)
 }
 
 /* read a JSON word (a sequence of alphanumeric chars) */
-ustring parse_word(std::basic_istream<uint32_t> &is)
+std::string parse_word(std::basic_istream<uint32_t> &is)
 {
 	/* skip leading space */
 	unsigned int c = is.peek();
-	while (is && isspace(c)) {
+	while (!is.eof() && isspace(c)) {
 		is.get();
 		c = is.peek();
 	}
-	if (!is || !isalpha(c)) {
+	if (is.eof() || !isalpha(c)) {
 		throw json_parse_error("Expected a word");
 	}
-	ustring out;
+	std::string out;
 	out += c;
+	is.get();
 	c = is.peek();
-	while (is && isalnum(c)) {
+	while (!is.eof() && isalnum(c)) {
 		out += c;
 		is.get();
 		c = is.peek();
+	}
+	return out;
+}
+
+/* read a JSON number */
+std::string parse_number(std::basic_istream<uint32_t> &is)
+{
+	/* skip leading space */
+	unsigned int c = is.peek();
+	while (!is.eof() && isspace(c)) {
+		is.get();
+		c = is.peek();
+	}
+	if (is.eof() || !(isdigit(c) || c == '-')) {
+		throw json_parse_error("Expected a number");
+	}
+	std::string out;
+	if (c == '-') {
+		out += '-';
+		is.get();
+		c = is.peek();
+		if (is.eof() || !isdigit(c)) {
+			throw json_parse_error("Expected a digit after -");
+		}
+	}
+	while (!is.eof() && isdigit(c)) {
+		out += c;
+		is.get();
+		c = is.peek();
+	}
+
+	/* decimal part */
+	if (!is.eof() && c == '.') {
+		out += '.';
+		is.get();
+		c = is.peek();
+		while (!is.eof() && isdigit(c)) {
+			out += c;
+			is.get();
+			c = is.peek();
+		}
+	}
+
+	/* exponent */
+	if (!is.eof() && (c == 'e' || c == 'E')) {
+		out += 'e';
+		is.get();
+		c = is.peek();
+		if (c == '-') {
+			out += '-';
+			is.get();
+			c = is.peek();
+			if (is.eof() || !isdigit(c)) {
+				throw json_parse_error("Expected a digit after -");
+			}
+		}
+		while (!is.eof() && isdigit(c)) {
+			out += c;
+			is.get();
+			c = is.peek();
+		}
 	}
 	return out;
 }
@@ -88,11 +181,11 @@ ustring parse_string(std::basic_istream<uint32_t> &is)
 
 	ustring out;
 	unsigned int c = is.get();
-	while (is && c != '"') {
+	while (!is.eof() && c != '"') {
 		if (c == '\\') {
 			/* An escaped character */
 			c = is.get();
-			if (!is) {
+			if (is.eof()) {
 				throw json_parse_error("Invalid escaped char");
 			}
 			if (c < 128 && table[c] != 0) {
@@ -110,7 +203,7 @@ ustring parse_string(std::basic_istream<uint32_t> &is)
 		out += c;
 		c = is.get();
 	}
-	if (!is) {
+	if (is.eof()) {
 		throw json_parse_error("Unterminated string");
 	}
 	return out;
@@ -414,17 +507,99 @@ void JSON_Value::operator =(const JSON_Value &from)
 	}
 }
 
+JSON_Value::Type JSON_Value::equal_type() const
+{
+	if (m_type == NUMBER_INT)
+		return NUMBER_FLOAT;
+	return m_type;
+}
+
+bool JSON_Value::operator ==(const JSON_Value &other) const
+{
+	/*
+	 * Check whether the values are of the same type. Integers and
+	 * floats are considered the same.
+	 */
+	if (equal_type() != other.equal_type()) {
+		return false;
+	}
+
+	switch (m_type) {
+	case NULL_VALUE:
+		/* Nulls are always equal */
+		return true;
+
+	case BOOLEAN:
+		return m_boolean == other.m_boolean;
+	case NUMBER_INT:
+		if (other.m_type == NUMBER_INT) {
+			return m_int == other.m_int;
+		} else {
+			return m_int == other.m_float;
+		}
+	case NUMBER_FLOAT:
+		if (other.m_type == NUMBER_INT) {
+			return m_float == other.m_int;
+		} else {
+			return m_float == other.m_float;
+		}
+	case STRING:
+		return *m_string == *other.m_string;
+
+	case OBJECT:
+		if (m_children->size() != other.m_children->size())
+			return false;
+
+		/* Check that every key can be also found in the other map */
+		for (std::map<ustring, JSON_Value>::const_iterator i =
+		     m_children->begin(); i != m_children->end(); ++i) {
+			std::map<ustring, JSON_Value>::const_iterator j =
+				other.m_children->find(i->first);
+			if (j == other.m_children->end())
+				return false;
+			if (i->second != j->second)
+				return false;
+		}
+		/* No differences found */
+		return true;
+
+	case ARRAY: {
+			if (m_array->size() != other.m_array->size())
+				return false;
+			/* Iterate over both arrays at the same time */
+			std::list<JSON_Value>::const_iterator j =
+				other.m_array->begin();
+			for (std::list<JSON_Value>::const_iterator i =
+			     m_array->begin(); i != m_array->end(); ++i) {
+				if (*i != *j)
+					return false;
+				j++;
+			}
+			/* again, no differences */
+			return true;
+		}
+
+	default:
+		assert(0);
+	}
+}
+
+bool JSON_Value::operator !=(const JSON_Value &other) const
+{
+	return !(*this == other);
+}
+
 void JSON_Value::load(std::basic_istream<uint32_t> &is)
 {
 	clear();
 
 	/* skip leading space */
 	unsigned int c = is.peek();
-	while (is && isspace(c)) {
+	while (!is.eof() && isspace(c)) {
 		is.get();
 		c = is.peek();
 	}
-	if (!is) {
+	if (is.eof()) {
 		throw json_parse_error("Expected a token");
 	}
 	switch (c) {
@@ -440,14 +615,14 @@ void JSON_Value::load(std::basic_istream<uint32_t> &is)
 		m_type = OBJECT;
 		while (!check(is, '}')) {
 			ustring key = parse_string(is);
-			skip(is, ':');
+			expect(is, ':');
 			JSON_Value val;
 			val.load(is);
 			(*m_children)[key] = val;
 			if (!skip(is, ','))
 				break;
 		}
-		skip(is, '}');
+		expect(is, '}');
 		break;
 
 	case '[':
@@ -462,33 +637,54 @@ void JSON_Value::load(std::basic_istream<uint32_t> &is)
 			if (!skip(is, ','))
 				break;
 		}
-		skip(is, ']');
+		expect(is, ']');
 		break;
 
 	default:
 		if (isalpha(c)) {
 			/* It is a word. The only possible words are below */
-			ustring id = parse_word(is);
-			if (id == to_unicode("null")) {
+			std::string id = parse_word(is);
+			if (id == "null") {
 				m_type = NULL_VALUE;
-			} else if (id == to_unicode("true")) {
+			} else if (id == "true") {
 				m_type = BOOLEAN;
 				m_boolean = true;
-			} else if (id == to_unicode("false")) {
+			} else if (id == "false") {
 				m_type = BOOLEAN;
 				m_boolean = false;
 			} else {
 				throw json_parse_error("Unknown word");
 			}
-		} else {
-			/* TODO: Add support for floats */
-			m_type = NUMBER_INT;
-			is >> m_int;
-			if (!is) {
-				throw json_parse_error("Invalid token");
+		} else if (isdigit(c) || c == '-') {
+			/* A number (a float or an integer) */
+			std::string num = parse_number(is);
+			std::istringstream parser(num);
+
+			if (num.find('.') != std::string::npos ||
+			    num.find('e') != std::string::npos) {
+				m_type = NUMBER_FLOAT;
+				parser >> m_float;
+			} else {
+				m_type = NUMBER_INT;
+				parser >> m_int;
 			}
+			if (!parser) {
+				throw json_parse_error("Invalid number " + num);
+			}
+		} else {
+			throw json_parse_error("Unknown character");
 		}
 		break;
+	}
+}
+
+void JSON_Value::load_all(std::basic_istream<uint32_t> &is)
+{
+	load(is);
+
+	char c = is.get();
+	if (!is.eof()) {
+		throw json_parse_error("Extra characters after JSON data");
 	}
 }
 
@@ -525,8 +721,8 @@ ustring JSON_Value::serialize(int indentation) const
 		 */
 		out = '{';
 		out += '\n';
-		for (const_map_iter<ustring, JSON_Value> i(*m_children); i;
-		     i.next()) {
+		for (std::map<ustring, JSON_Value>::const_iterator i =
+		     m_children->begin(); i != m_children->end(); ++i) {
 			if (!first) {
 				out += ',';
 				out += '\n';
@@ -535,11 +731,11 @@ ustring JSON_Value::serialize(int indentation) const
 				out += '\t';
 			}
 			out += '"';
-			out += escape(i.key());
+			out += escape(i->first);
 			out += '"';
 			out += ':';
 			out += ' ';
-			out += i->serialize(indentation + 1);
+			out += i->second.serialize(indentation + 1);
 			first = false;
 		}
 		if (!first) {
@@ -554,7 +750,8 @@ ustring JSON_Value::serialize(int indentation) const
 	case ARRAY:
 		out = '[';
 		out += '\n';
-		for (const_list_iter<JSON_Value> i(*m_array); i; i.next()) {
+		for (std::list<JSON_Value>::const_iterator i =
+		     m_array->begin(); i != m_array->end(); ++i) {
 			if (!first) {
 				out += ',';
 				out += '\n';
