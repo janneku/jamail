@@ -124,7 +124,7 @@ std::string parse_string(std::istream &is)
 				/* Escaped char, used by Gmail's IMAP server */
 				c = is.get();
 				if (!is || !(c == '"' || c == '\\')) {
-					throw std::runtime_error("Invalid escaped char");
+					throw imap_parse_error("Invalid escaped char");
 				}
 			}
 			out += c;
@@ -133,7 +133,6 @@ std::string parse_string(std::istream &is)
 		if (!is) {
 			throw imap_parse_error("Unterminated string");
 		}
-		return out;
 
 	} else {
 		/* handle NIL */
