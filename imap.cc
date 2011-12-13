@@ -22,11 +22,11 @@ bool check(std::istream &is, char token)
 {
 	/* skip leading space */
 	char c = is.peek();
-	while (is && isspace(c)) {
+	while (!is.eof() && isspace(c)) {
 		is.get();
 		c = is.peek();
 	}
-	return (is && c == token);
+	return (!is.eof() && c == token);
 }
 
 bool skip(std::istream &is, char token)
@@ -43,7 +43,7 @@ void expect(std::istream &is, char token)
 	/* skips leading space */
 	char c;
 	is >> c;
-	if (!is || c != token) {
+	if (is.eof() || c != token) {
 		throw imap_parse_error(strf("Expected token %c", token));
 	}
 }
@@ -60,13 +60,13 @@ std::string parse_astring(std::istream &is)
 	/* skips leading space */
 	char c;
 	is >> c;
-	if (!is || !is_atom(c)) {
+	if (is.eof() || !is_atom(c)) {
 		throw imap_parse_error("Expected an atom string");
 	}
 	std::string out;
 	out += c;
 	c = is.peek();
-	while (is && is_atom(c)) {
+	while (!is.eof() && is_atom(c)) {
 		out += c;
 		is.get();
 		c = is.peek();
@@ -90,7 +90,7 @@ std::string parse_string(std::istream &is)
 
 		/* skip leading space (and the CRLF) */
 		char c = is.get();
-		while (is && c != '\r') {
+		while (!is.eof() && c != '\r') {
 			if (!isspace(c)) {
 				throw imap_parse_error("Junk before CRLF");
 			}
@@ -101,13 +101,13 @@ std::string parse_string(std::istream &is)
 		 * The content of the string is after a CRLF, and we need to
 		 * signal that the caller needs to give us another line.
 		 */
-		if (!is) {
+		if (is.eof()) {
 			throw imap_need_more();
 		}
 
 		/* skip the LF */
 		c = is.get();
-		if (!is || c != '\n') {
+		if (is.eof() || c != '\n') {
 			throw imap_parse_error("Expected an LF");
 		}
 
@@ -119,18 +119,18 @@ std::string parse_string(std::istream &is)
 	} else if (skip(is, '"')) {
 		/* a quoted string */
 		char c = is.get();
-		while (is && c != '"') {
+		while (!is.eof() && c != '"') {
 			if (c == '\\') {
 				/* Escaped char, used by Gmail's IMAP server */
 				c = is.get();
-				if (!is || !(c == '"' || c == '\\')) {
+				if (is.eof() || !(c == '"' || c == '\\')) {
 					throw imap_parse_error("Invalid escaped char");
 				}
 			}
 			out += c;
 			c = is.get();
 		}
-		if (!is) {
+		if (is.eof()) {
 			throw imap_parse_error("Unterminated string");
 		}
 
