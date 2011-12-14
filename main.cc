@@ -298,19 +298,10 @@ void load_cache(IMAP *account)
 			continue;
 		}
 
-		std::string buf;
-		while (1) {
-			size_t pos = buf.size();
-			buf.resize(pos + 4096, 0);
-			if (!f.read(&buf[pos], 4096)) {
-				buf.resize(pos + f.gcount());
-				break;
-			}
-		}
-
-		std::basic_istringstream<uint32_t> parser(decode(buf, "UTF-8"));
+		dec_streambuf sb(f, "UTF-8");
+		std::basic_istream<uint32_t> is(&sb);
 		JSON_Value val;
-		val.load(parser);
+		val.load(is);
 
 		Envelope env;
 		env.subject = val.get("subject").to_string();
