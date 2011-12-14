@@ -234,7 +234,7 @@ void add_message_to_list(IMAP *account, const Envelope *env)
 	/* GTK wants UTF-8 */
 	std::string from = "?";
 	if (!env->from.empty()) {
-		encode(env->from.front().email, "UTF-8");
+		from = encode(env->from.front().email, "UTF-8");
 	}
 	std::string subject = encode(env->subject, "UTF-8");
 
@@ -251,6 +251,8 @@ void add_message_to_list(IMAP *account, const Envelope *env)
 
 void add_message(IMAP *account, const Envelope *env)
 {
+	add_message_to_list(account, env);
+
 	/* Serialize the headers of the message with JSON */
 	JSON_Value message(JSON_Value::OBJECT);
 	message.insert(to_unicode("subject"), env->subject);
@@ -262,14 +264,18 @@ void add_message(IMAP *account, const Envelope *env)
 	message.insert(to_unicode("bcc"), json_address_list(env->bcc));
 	message.insert(to_unicode("reply_to"), json_address_list(env->reply_to));
 
-	std::string buf = encode(message.serialize(), "UTF-8");
 	std::string fname = cache_path + '/' + account->server() +
 			    strf("/%d", env->id);
-	std::ofstream f(fname.c_str(), std::ofstream::binary);
-	f << buf;
-	f.close();
 
-	add_message_to_list(account, env);
+	/* write to a file using UTF-8 encoding */
+	std::ofstream f(fname.c_str(), std::ofstream::binary);
+	if (!f) {
+		debug("Unable to write to %s\n", fname.c_str());
+		return;
+	}
+	enc_streambuf sb(f, "UTF-8");
+	std::basic_ostream<uint32_t> os(&sb);
+	message.write(os);
 }
 
 void load_cache(IMAP *account)

@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <streambuf>
 #include <istream>
+#include <ostream>
 
 /* An unicode string (UTF-32) */
 typedef std::basic_string<uint32_t> ustring;
@@ -35,21 +36,17 @@ private:
 	void fillbuf();
 };
 
-class enc_streambuf: public std::streambuf {
+class enc_streambuf: public std::basic_streambuf<uint32_t> {
 public:
-	enc_streambuf(std::basic_istream<uint32_t> &source,
-		      const std::string &enc);
+	enc_streambuf(std::ostream &sink, const std::string &enc);
+	~enc_streambuf();
 
 private:
-	std::basic_istream<uint32_t> &m_source;
+	std::ostream &m_sink;
 	std::string m_enc;
-	uint32_t m_readbuf[1024];
-	char *m_input;
-	size_t m_left;
-	char m_buf[1024];
+	uint32_t m_buf[1024];
 
-	int_type underflow();
-	void fillbuf();
+	int_type overflow(int_type c = traits_type::eof());
 };
 
 #endif
