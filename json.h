@@ -13,6 +13,7 @@
 #include <list>
 #include <map>
 #include <istream>
+#include <ostream>
 #include <stdexcept>
 
 /* An unicode string (UTF-32) */
@@ -106,10 +107,10 @@ public:
 	void load_all(std::basic_istream<uint32_t> &is);
 
 	/*
-	 * Serialize the JSON value into a unicode string. The value
-	 * is written recursively to the output using proper indentation.
+	 * Serialize the JSON value as unicode to the given output stream. The
+	 * value is written recursively to the output using proper indentation.
 	 */
-	ustring serialize(int indentation = 0) const;
+	void write(std::basic_ostream<uint32_t> &os, int indentation = 0) const;
 
 private:
 	Type m_type;

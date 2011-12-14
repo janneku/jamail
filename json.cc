@@ -688,29 +688,29 @@ void JSON_Value::load_all(std::basic_istream<uint32_t> &is)
 	}
 }
 
-ustring JSON_Value::serialize(int indentation) const
+void JSON_Value::write(std::basic_ostream<uint32_t> &os, int indentation) const
 {
 	ustring out;
 	bool first = true;
 
 	switch (m_type) {
 	case NULL_VALUE:
-		out = to_unicode("null");
+		os << to_unicode("null");
 		break;
 	case BOOLEAN:
-		out = m_boolean ? to_unicode("true") : to_unicode("false");
+		os << (m_boolean ? to_unicode("true") : to_unicode("false"));
 		break;
 	case NUMBER_INT:
-		out = to_unicode(strf("%ld", m_int));
+		os << to_unicode(strf("%ld", m_int));
 		break;
 	case NUMBER_FLOAT:
-		out = to_unicode(strf("%f", m_float));
+		os << to_unicode(strf("%f", m_float));
 		break;
 
 	case STRING:
-		out = '"';
-		out += escape(*m_string);
-		out += '"';
+		os.put('"');
+		os << escape(*m_string);
+		os.put('"');
 		break;
 
 	case OBJECT:
@@ -719,60 +719,59 @@ ustring JSON_Value::serialize(int indentation) const
 		 * from the indentation of the {} characters, one child
 		 * for each line.
 		 */
-		out = '{';
-		out += '\n';
+		os.put('{');
+		os.put('\n');
 		for (std::map<ustring, JSON_Value>::const_iterator i =
 		     m_children->begin(); i != m_children->end(); ++i) {
 			if (!first) {
-				out += ',';
-				out += '\n';
+				os.put(',');
+				os.put('\n');
 			}
 			for (int j = 0; j <= indentation; ++j) {
-				out += '\t';
+				os.put('\t');
 			}
-			out += '"';
-			out += escape(i->first);
-			out += '"';
-			out += ':';
-			out += ' ';
-			out += i->second.serialize(indentation + 1);
+			os.put('"');
+			os << escape(i->first);
+			os.put('"');
+			os.put(':');
+			os.put(' ');
+			i->second.write(os, indentation + 1);
 			first = false;
 		}
 		if (!first) {
-			out += '\n';
+			os.put('\n');
 		}
 		for (int j = 0; j < indentation; ++j) {
-			out += '\t';
+			os.put('\t');
 		}
-		out += '}';
+		os.put('}');
 		break;
 
 	case ARRAY:
-		out = '[';
-		out += '\n';
+		os.put('[');
+		os.put('\n');
 		for (std::list<JSON_Value>::const_iterator i =
 		     m_array->begin(); i != m_array->end(); ++i) {
 			if (!first) {
-				out += ',';
-				out += '\n';
+				os.put(',');
+				os.put('\n');
 			}
 			for (int j = 0; j <= indentation; ++j) {
-				out += '\t';
+				os.put('\t');
 			}
-			out += i->serialize(indentation + 1);
+			i->write(os, indentation + 1);
 			first = false;
 		}
 		if (!first) {
-			out += '\n';
+			os.put('\n');
 		}
 		for (int j = 0; j < indentation; ++j) {
-			out += '\t';
+			os.put('\t');
 		}
-		out += ']';
+		os.put(']');
 		break;
 
 	default:
 		assert(0);
 	}
-	return out;
 }
